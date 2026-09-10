@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class NewDonationBase(BaseModel):
     tier: int | None = None
     cause: str | None = None
-    scope: str
+    scope: list[str]
     duration_days: int = 30
 
 

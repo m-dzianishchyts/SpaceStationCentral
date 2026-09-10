@@ -56,6 +56,7 @@ async def resolve_benefit_source(
         select(BenefitPolicy).where(
             BenefitPolicy.cause == cause,
             BenefitPolicy.scope == scope,
+            BenefitPolicy.active,
         )
     ).first()
     if policy is None:
@@ -63,13 +64,10 @@ async def resolve_benefit_source(
             select(BenefitPolicy).where(
                 BenefitPolicy.cause == cause,
                 BenefitPolicy.scope == "*",
+                BenefitPolicy.active,
             )
         ).first()
-    if not policy:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Benefit policy not found")
-    if policy.active is False:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Benefit policy is not active")
-    return policy.benefit_tier
+    return policy.benefit_tier if policy else None
 
 
 @router.get("", status_code=status.HTTP_200_OK)
@@ -128,21 +126,29 @@ async def create_donation_by_discord(
     session: SessionDep, new_donation: NewDonationDiscord
 ) -> list[DonationResponse]:
     """Creating a new donation from any other identifier doesnt make much sense."""
-    player = await get_or_create_player_by_discord_id(session, new_donation.discord_id)
-
-    fan_out = new_donation.scope == "*"
-    scopes = (
+    requested_scopes = set(new_donation.scope)
+    active_scopes = set(
         session.exec(select(BenefitsScope.name).where(BenefitsScope.active, BenefitsScope.name != "*")).all()
-        if fan_out
-        else [new_donation.scope]
     )
+    invalid_scopes = requested_scopes - active_scopes - {"*"}
+    if invalid_scopes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Unknown or inactive scopes: {', '.join(sorted(invalid_scopes))}",
+        )
+
+    scopes = requested_scopes - {"*"}
+    if "*" in requested_scopes:
+        scopes |= active_scopes
     if not scopes:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No active scopes available")
 
+    player = await get_or_create_player_by_discord_id(session, new_donation.discord_id)
     donations: list[BenefitGrant] = []
     for grant_scope in scopes:
-        policy_tier = await resolve_benefit_source(session, new_donation.cause, grant_scope)
-        tier = policy_tier if policy_tier is not None else new_donation.tier
+        tier = new_donation.tier
+        if tier is None:
+            tier = await resolve_benefit_source(session, new_donation.cause, grant_scope)
         if tier is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tier is required for this grant")
         donations.append(
